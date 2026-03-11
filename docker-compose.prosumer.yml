@@ -1,0 +1,21 @@
+# Prosumer profile override
+# Usage: docker compose -f docker-compose.yml -f docker-compose.prosumer.yml up
+version: "3.9"
+
+services:
+  api:
+    environment:
+      PROFILE: prosumer
+
+  celery_worker:
+    environment:
+      PROFILE: prosumer
+      CELERY_CONCURRENCY: 12
+
+  influxdb:
+    volumes:
+      - influxdb_data:/var/lib/influxdb2
+    deploy:
+      resources:
+        limits:
+          memory: 4g
