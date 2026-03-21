@@ -11,7 +11,6 @@ logger = logging.getLogger(__name__)
 @app.task(name="traffic_ai.tasks.risk_tasks.compute_risk_score", bind=True, max_retries=2)
 def compute_risk_score(self, segment_id: str, pilot: str = "default") -> dict:
     """Compute the risk score for a single segment and evaluate alert thresholds."""
-    from traffic_ai.analytics.risk_scorer import RiskScoringEngine
     from traffic_ai.analytics.alert_engine import evaluate_and_alert
     from traffic_ai.db.database import init_db, async_session_factory
 
@@ -19,7 +18,8 @@ def compute_risk_score(self, segment_id: str, pilot: str = "default") -> dict:
         await init_db()
         assert async_session_factory is not None
         async with async_session_factory() as session:
-            engine = RiskScoringEngine(db=session)
+            from traffic_ai.analytics.risk_scorer_ml import MLRiskScoringEngine  # noqa: PLC0415
+            engine = MLRiskScoringEngine(db=session)
             result = await engine.compute_with_explanation(segment_id)
             score = result["score"]
             actions = await evaluate_and_alert(session, segment_id, score, pilot=pilot)

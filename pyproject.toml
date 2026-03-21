@@ -38,9 +38,17 @@ dev = [
     "ruff",
 ]
 ml = [
-    "shap",
-    "ultralytics",
-    "boto3",
+    # Inference (runtime)
+    "onnxruntime",         # ONNX RT — MIT
+    "Pillow",              # JPEG decode for vehicle detector
+    # Training scripts only (not needed at runtime)
+    "torch",               # LSTM training
+    "onnx",                # ONNX export
+    "xgboost",             # Risk scorer training + inference
+    "scikit-learn",        # train/val split, preprocessing
+    "statsmodels",         # STL seasonal decomposition
+    "requests",            # historical data download in training scripts
+    "shap",                # SHAP explanations (optional)
 ]
 s3 = [
     "boto3",

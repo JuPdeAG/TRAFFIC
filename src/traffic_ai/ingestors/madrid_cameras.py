@@ -10,7 +10,7 @@ Data sources (no auth, CC BY 4.0):
   Coverage:     M-30 ring road + central Madrid surface roads
   Refresh:      Every 5 minutes officially
 
-Same YOLO inference logic as DGTCameraIngestor (shared _detect_vehicles).
+Same ONNX inference logic as DGTCameraIngestor (shared _detect_vehicles → ml.vehicle_detector).
 """
 from __future__ import annotations
 import logging
