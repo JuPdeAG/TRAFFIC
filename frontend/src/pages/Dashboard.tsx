@@ -10,7 +10,8 @@ import Table from '../components/ui/Table';
 import Spinner from '../components/ui/Spinner';
 import { useSegments, useRiskSummary } from '../hooks/useSegments';
 import { useIncidents } from '../hooks/useIncidents';
-import { trafficFlow, sparklineData } from '../data/mock';
+import { useTrafficFlow } from '../hooks/useMetrics';
+import { sparklineData } from '../data/mock';
 import { chartColors } from '../design/tokens';
 import type { RiskSummaryItem } from '../api/risk';
 import type { Incident } from '../api/alerts';
@@ -29,6 +30,7 @@ export default function Dashboard() {
   const { data: segments, isLoading: segLoading } = useSegments();
   const { data: riskSummary, isLoading: riskLoading } = useRiskSummary();
   const { data: incidents, isLoading: incLoading } = useIncidents('active');
+  const { data: flowData } = useTrafficFlow(24);
 
   const isLoading = segLoading || riskLoading || incLoading;
 
@@ -65,7 +67,7 @@ export default function Dashboard() {
         <Card className="col-span-2">
           <h2 className="text-[15px] font-semibold tracking-[-0.02em] text-[#F4F5F7] mb-4">Traffic Flow — Last 24h</h2>
           <ResponsiveContainer width="100%" height={280}>
-            <AreaChart data={trafficFlow}>
+            <AreaChart data={flowData ?? []}>
               <defs>
                 <linearGradient id="flowGrad" x1="0" y1="0" x2="0" y2="1">
                   <stop offset="0%" stopColor={chartColors.primary} stopOpacity={0.3} />

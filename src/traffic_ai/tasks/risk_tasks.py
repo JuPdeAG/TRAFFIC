@@ -24,6 +24,9 @@ def compute_risk_score(self, segment_id: str, pilot: str = "default") -> dict:
             score = result["score"]
             actions = await evaluate_and_alert(session, segment_id, score, pilot=pilot)
             await session.commit()
+
+        # Persist score to InfluxDB for trend charts
+        await _write_risk_score(segment_id, score, result.get("level", "low"))
         return {**result, "alert_actions": actions}
 
     loop = asyncio.new_event_loop()
@@ -71,3 +74,15 @@ def compute_all_risk_scores() -> dict:
 
     logger.info("Dispatched risk computation for %d segments (concurrency=%d)", dispatched, concurrency)
     return {"dispatched": dispatched, "concurrency": concurrency}
+
+
+async def _write_risk_score(segment_id: str, score: float, level: str) -> None:
+    """Persist a risk score point to InfluxDB for historical trend charts."""
+    try:
+        from traffic_ai.db.influx import write_points  # noqa: PLC0415
+        seg = segment_id.replace(" ", r"\ ").replace(",", r"\,")
+        lvl = level.replace(" ", r"\ ")
+        line = f"risk_score,segment_id={seg},level={lvl} score={score}"
+        await write_points([line])
+    except Exception:
+        logger.debug("Failed to write risk score to InfluxDB for %s", segment_id)

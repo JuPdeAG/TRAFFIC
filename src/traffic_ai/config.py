@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     noaa_stations: str = ""
     aemet_stations: str = ""
     camera_urls: str = ""
+    # JSON array of {lat, lon, name} objects for Open-Meteo live weather ingestor.
+    # Defaults to Madrid city centre when empty.
+    open_meteo_locations: str = ""
     model_config = {"env_file": ".env", "extra": "ignore"}
 
     @property

@@ -3,7 +3,7 @@ import PageContainer from '../components/ui/PageContainer';
 import Card from '../components/ui/Card';
 import Spinner from '../components/ui/Spinner';
 import { useRiskSummary } from '../hooks/useSegments';
-import { historicalRisk } from '../data/mock';
+import { useRiskTrend } from '../hooks/useMetrics';
 import { chartColors } from '../design/tokens';
 
 const LEVEL_COLORS = {
@@ -27,6 +27,7 @@ const FACTOR_COLORS = [
 
 export default function RiskAnalysis() {
   const { data: riskSummary, isLoading } = useRiskSummary();
+  const { data: riskTrend } = useRiskTrend(30);
 
   if (isLoading) return <PageContainer><Spinner className="h-64" /></PageContainer>;
 
@@ -119,8 +120,13 @@ export default function RiskAnalysis() {
 
       <Card>
         <h2 className="text-[15px] font-semibold tracking-[-0.02em] text-[#F4F5F7] mb-4">Historical Risk Trend — 30 Days</h2>
+        {(!riskTrend || riskTrend.length === 0) && (
+          <p className="text-[12px] text-[#5E6A7A] mb-3 px-1">
+            Collecting data — risk trend will appear after the first scoring cycle runs.
+          </p>
+        )}
         <ResponsiveContainer width="100%" height={280}>
-          <LineChart data={historicalRisk}>
+          <LineChart data={riskTrend ?? []}>
             <CartesianGrid strokeDasharray="3 3" stroke={chartColors.grid} vertical={false} />
             <XAxis dataKey="day" tick={{ fill: chartColors.text, fontSize: 11 }} axisLine={false} tickLine={false} interval={4} />
             <YAxis domain={[0, 100]} tick={{ fill: chartColors.text, fontSize: 11 }} axisLine={false} tickLine={false} />
