@@ -28,10 +28,15 @@ from traffic_ai.ingestors.base import BaseIngestor
 
 logger = logging.getLogger(__name__)
 
-# Open Data BCN CKAN API — traffic state resource
-BCN_TRAFFIC_URL = (
+# Open Data BCN CKAN API — package_show to resolve real resource UUID
+BCN_PACKAGE_SHOW_URL = (
+    "https://opendata-ajuntament.barcelona.cat/data/api/action/package_show?id=trams"
+)
+
+# Base URL for datastore_search; resource_id is filled in at runtime
+BCN_DATASTORE_SEARCH_BASE = (
     "https://opendata-ajuntament.barcelona.cat/data/api/action/datastore_search"
-    "?resource_id=trams&limit=500"
+    "?resource_id={resource_id}&limit=500"
 )
 
 # Fallback: static GeoJSON / JSON published by the Ajuntament
@@ -66,6 +71,7 @@ class BarcelonaIngestor(BaseIngestor):
 
     def __init__(self) -> None:
         super().__init__(name="barcelona")
+        self._resource_id: str | None = None
 
     async def start(self) -> None:
         self._running = True
@@ -95,10 +101,59 @@ class BarcelonaIngestor(BaseIngestor):
 
     # ── private ─────────────────────────────────────────────────────────────
 
+    async def _resolve_resource_id(self, session: aiohttp.ClientSession) -> str | None:
+        """Resolve the actual CKAN resource UUID for the trams dataset.
+
+        Calls ``package_show?id=trams`` and picks the first active resource
+        whose name contains "TRAMS", falling back to the first resource in the
+        list.  The resolved UUID is cached on ``self._resource_id``.
+        """
+        if self._resource_id:
+            return self._resource_id
+        try:
+            async with session.get(
+                BCN_PACKAGE_SHOW_URL, timeout=aiohttp.ClientTimeout(total=15)
+            ) as resp:
+                if resp.status != 200:
+                    self.logger.warning(
+                        "package_show returned HTTP %d", resp.status
+                    )
+                    return None
+                data = await resp.json()
+            resources: list[dict] = data.get("result", {}).get("resources", [])
+            if not resources:
+                self.logger.warning("No resources found in Barcelona trams package")
+                return None
+            # Prefer a resource whose name contains "TRAMS" (case-insensitive)
+            chosen = next(
+                (r for r in resources if "TRAMS" in r.get("name", "").upper()),
+                resources[0],
+            )
+            self._resource_id = chosen["id"]
+            self.logger.info(
+                "Resolved Barcelona trams resource UUID: %s (%s)",
+                self._resource_id,
+                chosen.get("name", ""),
+            )
+            return self._resource_id
+        except Exception:
+            self.logger.warning("Failed to resolve Barcelona trams resource UUID")
+            return None
+
     async def _fetch(self) -> dict | list | None:
         async with aiohttp.ClientSession() as session:
-            # Try CKAN API first
-            for url in (BCN_TRAFFIC_URL, BCN_TRAFFIC_FALLBACK_URL):
+            # Resolve real resource UUID then try CKAN datastore_search
+            resource_id = await self._resolve_resource_id(session)
+            primary_url: str | None = None
+            if resource_id:
+                primary_url = BCN_DATASTORE_SEARCH_BASE.format(resource_id=resource_id)
+
+            urls_to_try = []
+            if primary_url:
+                urls_to_try.append(primary_url)
+            urls_to_try.append(BCN_TRAFFIC_FALLBACK_URL)
+
+            for url in urls_to_try:
                 try:
                     async with session.get(url, timeout=aiohttp.ClientTimeout(total=20)) as resp:
                         if resp.status == 200:

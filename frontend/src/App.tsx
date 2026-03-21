@@ -12,6 +12,7 @@ import Alerts from './pages/Alerts';
 import Weather from './pages/Weather';
 import MapView from './pages/MapView';
 import Settings from './pages/Settings';
+import Predictions from './pages/Predictions';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -36,6 +37,7 @@ export default function App() {
                 <Route path="/map" element={<MapView />} />
                 <Route path="/segments" element={<Segments />} />
                 <Route path="/risk" element={<RiskAnalysis />} />
+                <Route path="/predictions" element={<Predictions />} />
                 <Route path="/cameras" element={<Cameras />} />
                 <Route path="/alerts" element={<Alerts />} />
                 <Route path="/weather" element={<Weather />} />

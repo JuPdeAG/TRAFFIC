@@ -1,4 +1,4 @@
-"""Weather ingestors -- NOAA (US) and AEMET (Spain)."""
+"""Weather ingestors -- NOAA (US), AEMET (Spain), and Open-Meteo (global)."""
 from __future__ import annotations
 import logging
 from typing import Any
@@ -120,22 +120,137 @@ class AEMETWeatherIngestor(BaseIngestor):
         return results
 
 
+_DEFAULT_OPEN_METEO_LOCATIONS: list[dict] = [{"lat": 40.4168, "lon": -3.7038, "name": "Madrid"}]
+
+# WMO weather codes that indicate fog
+_FOG_WEATHER_CODES: frozenset[int] = frozenset({45, 48})
+
+_OPEN_METEO_FORECAST_URL = (
+    "https://api.open-meteo.com/v1/forecast"
+    "?latitude={lat}&longitude={lon}"
+    "&current=temperature_2m,relative_humidity_2m,wind_speed_10m,precipitation,"
+    "visibility,weather_code,cloud_cover"
+    "&timezone=auto"
+)
+
+
+class OpenMeteoIngestor(BaseIngestor):
+    """Ingests live weather forecasts from the Open-Meteo API (no API key required)."""
+
+    def __init__(self, locations: list[dict] | None = None) -> None:
+        super().__init__(name="open_meteo_weather")
+        configured = getattr(settings, "open_meteo_locations", None)
+        self.locations: list[dict] = locations or configured or _DEFAULT_OPEN_METEO_LOCATIONS
+
+    async def start(self) -> None:
+        self._running = True
+
+    async def stop(self) -> None:
+        self._running = False
+
+    async def poll(self) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        async with aiohttp.ClientSession() as session:
+            for loc in self.locations:
+                lat = loc.get("lat")
+                lon = loc.get("lon")
+                name = loc.get("name", f"{lat},{lon}")
+                url = _OPEN_METEO_FORECAST_URL.format(lat=lat, lon=lon)
+                try:
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                        if resp.status != 200:
+                            self.logger.warning(
+                                "Open-Meteo returned HTTP %d for location %s", resp.status, name
+                            )
+                            continue
+                        data = await resp.json()
+                except Exception:
+                    self.logger.warning("Open-Meteo request failed for location %s", name)
+                    continue
+
+                try:
+                    current = data.get("current", {})
+                    temperature_c = current.get("temperature_2m")
+                    wind_speed_kmh = current.get("wind_speed_10m")
+                    precipitation_mm = current.get("precipitation", 0.0)
+                    visibility_m = current.get("visibility")
+                    weather_code = current.get("weather_code", 0)
+                    cloud_cover = current.get("cloud_cover", 0)
+
+                    # Derive fog_factor: fog/rime-fog weather codes → 1.0,
+                    # otherwise scale cloud_cover (0-100) to 0.0-0.3, capped at 1.0
+                    if weather_code in _FOG_WEATHER_CODES:
+                        fog_factor = 1.0
+                    else:
+                        fog_factor = min((cloud_cover or 0) / 100.0 * 0.3, 1.0)
+
+                    obs: dict[str, Any] = {
+                        "station_id": name,
+                        "temperature_c": temperature_c,
+                        "wind_speed_kmh": wind_speed_kmh,
+                        "precipitation_mm": precipitation_mm or 0.0,
+                        "visibility_m": visibility_m,
+                        "cloud_cover_pct": cloud_cover,
+                        "fog_factor": fog_factor,
+                        "source": "open_meteo",
+                    }
+                    results.append(obs)
+
+                    # Build InfluxDB line protocol
+                    fields: list[str] = []
+                    if temperature_c is not None:
+                        fields.append(f"temperature_c={temperature_c}")
+                    if wind_speed_kmh is not None:
+                        fields.append(f"wind_speed_kmh={wind_speed_kmh}")
+                    fields.append(f"precipitation_mm={precipitation_mm or 0.0}")
+                    if visibility_m is not None:
+                        fields.append(f"visibility_m={visibility_m}")
+                    fields.append(f"cloud_cover_pct={cloud_cover}")
+                    fields.append(f"fog_factor={fog_factor}")
+
+                    if fields:
+                        tag_name = name.replace(" ", r"\ ")
+                        line = (
+                            f"weather,station_id={tag_name},source=open_meteo "
+                            + ",".join(fields)
+                        )
+                        await write_points(line)
+                except Exception:
+                    self.logger.warning(
+                        "Failed to parse Open-Meteo response for location %s", name
+                    )
+
+        return results
+
+
 class CombinedWeatherIngestor(BaseIngestor):
-    """Aggregates NOAA and AEMET ingestors into a single interface."""
-    def __init__(self, noaa_stations: list[str] | None = None, aemet_stations: list[str] | None = None) -> None:
+    """Aggregates NOAA, AEMET, and Open-Meteo ingestors into a single interface."""
+
+    def __init__(
+        self,
+        noaa_stations: list[str] | None = None,
+        aemet_stations: list[str] | None = None,
+        open_meteo_locations: list[dict] | None = None,
+    ) -> None:
         super().__init__(name="weather")
         self.noaa = NOAAWeatherIngestor(station_ids=noaa_stations)
         self.aemet = AEMETWeatherIngestor(station_ids=aemet_stations)
+        self.open_meteo = OpenMeteoIngestor(locations=open_meteo_locations)
 
     async def start(self) -> None:
         self._running = True
         await self.noaa.start()
         await self.aemet.start()
+        await self.open_meteo.start()
 
     async def stop(self) -> None:
         self._running = False
         await self.noaa.stop()
         await self.aemet.stop()
+        await self.open_meteo.stop()
 
     async def poll(self) -> list[dict[str, Any]]:
-        return await self.noaa.poll() + await self.aemet.poll()
+        noaa_results = await self.noaa.poll()
+        aemet_results = await self.aemet.poll()
+        open_meteo_results = await self.open_meteo.poll()
+        return noaa_results + aemet_results + open_meteo_results
