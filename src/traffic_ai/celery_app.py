@@ -53,6 +53,16 @@ app.conf.beat_schedule = {
         "task": "traffic_ai.tasks.sensor_tasks.poll_valencia_traffic",
         "schedule": 180.0,  # every 3 min — matches Valencia update rate
     },
+    # ── TomTom national incidents — 1 call/poll, every 5 min (288 calls/day)
+    "poll-tomtom-incidents": {
+        "task": "traffic_ai.tasks.sensor_tasks.poll_tomtom_incidents",
+        "schedule": 300.0,
+    },
+    # ── TomTom flow — 6 key highway points, every 10 min (864 calls/day)
+    "poll-tomtom-flow": {
+        "task": "traffic_ai.tasks.sensor_tasks.poll_tomtom_flow",
+        "schedule": 600.0,
+    },
     # ── Weather
     "poll-weather": {
         "task": "traffic_ai.tasks.weather_tasks.poll_all_weather",

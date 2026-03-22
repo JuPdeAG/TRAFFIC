@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     # Comma-separated list of allowed CORS origins. Use "*" for dev, exact origins for prod.
     cors_origins: str = "http://localhost:5173"
     aemet_api_key: str = ""
+    tomtom_api_key: str = ""
     mapbox_token: str = ""
     loop_detector_urls: str = ""
     noaa_stations: str = ""

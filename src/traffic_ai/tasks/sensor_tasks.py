@@ -185,6 +185,44 @@ def poll_valencia_traffic(self) -> dict:
         loop.close()
 
 
+# ── TomTom national incidents ────────────────────────────────────────────────
+
+@app.task(name="traffic_ai.tasks.sensor_tasks.poll_tomtom_incidents", bind=True, max_retries=2)
+def poll_tomtom_incidents(self) -> dict:
+    """Fetch national Spain incidents from TomTom Traffic API (5-min, 1 call/poll)."""
+    from traffic_ai.ingestors.tomtom import TomTomIncidentsIngestor
+    ingestor = TomTomIncidentsIngestor()
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(ingestor.start())
+        results = loop.run_until_complete(ingestor.poll())
+        logger.info("TomTom incidents: ingested %d records", len(results))
+        return {"ingested": len(results), "source": "tomtom_incidents"}
+    except Exception as exc:
+        logger.exception("TomTom incidents ingestor failed")
+        raise self.retry(exc=exc, countdown=60)
+    finally:
+        loop.close()
+
+
+@app.task(name="traffic_ai.tasks.sensor_tasks.poll_tomtom_flow", bind=True, max_retries=2)
+def poll_tomtom_flow(self) -> dict:
+    """Fetch flow data for key Spanish highway points from TomTom (10-min)."""
+    from traffic_ai.ingestors.tomtom import TomTomFlowIngestor
+    ingestor = TomTomFlowIngestor()
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(ingestor.start())
+        results = loop.run_until_complete(ingestor.poll())
+        logger.info("TomTom flow: ingested %d point readings", len(results))
+        return {"ingested": len(results), "source": "tomtom_flow"}
+    except Exception as exc:
+        logger.exception("TomTom flow ingestor failed")
+        raise self.retry(exc=exc, countdown=60)
+    finally:
+        loop.close()
+
+
 # ── Baseline recalculation ───────────────────────────────────────────────────
 
 @app.task(name="traffic_ai.tasks.sensor_tasks.recalculate_baselines")
