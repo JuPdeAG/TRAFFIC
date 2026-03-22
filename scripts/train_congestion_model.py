@@ -75,6 +75,7 @@ FEATURE_COLS = [
 ]
 SEQ_LEN = 12   # 12 × 5-min = 60-min lookback
 HORIZONS = [15, 30, 60]  # predict 3 horizons simultaneously (minutes)
+N_FEATURES = len(FEATURE_COLS)  # 10
 
 
 def main() -> None:
@@ -576,14 +577,16 @@ def export_onnx(model, output_path: Path) -> None:
 
     dummy_input = torch.zeros(1, SEQ_LEN, N_FEATURES)
     model.eval()
+    # Use legacy exporter (dynamo=False) for compatibility with torch 2.x on Windows
     torch.onnx.export(
         model,
-        dummy_input,
+        (dummy_input,),
         str(output_path),
         input_names=["sequence"],
         output_names=["predictions"],
         dynamic_axes={"sequence": {0: "batch"}, "predictions": {0: "batch"}},
-        opset_version=17,
+        opset_version=18,
+        dynamo=False,
     )
     # Validate
     import onnx as onnx_lib
