@@ -33,12 +33,11 @@ requires_postgres = pytest.mark.skipif(
 
 
 @pytest_asyncio.fixture
-@requires_postgres
 async def db_session():
     """Provide a test database session using PostgreSQL.
 
     Requires a running PostGIS instance. Set TEST_DATABASE_URL env var.
-    Falls back to skip if unavailable.
+    Skipped automatically when the database is unavailable.
     """
     import os
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -48,9 +47,13 @@ async def db_session():
         "TEST_DATABASE_URL",
         "postgresql+asyncpg://traffic:traffic@localhost:5432/traffic_ai_test",
     )
-    engine = create_async_engine(test_db_url)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    try:
+        engine = create_async_engine(test_db_url, connect_args={})
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+    except Exception:
+        pytest.skip("PostgreSQL/PostGIS not available")
+        return
     session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     async with session_factory() as session:
         yield session
