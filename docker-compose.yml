@@ -1,8 +1,16 @@
 services:
   postgres:
-    image: postgis/postgis:15-3.3
+    image: imresamu/postgis:15-3.4-alpine
     ports:
-      - "5432:5432"
+      - "5433:5432"
+    command: >
+      postgres
+      -c shared_buffers=128MB
+      -c work_mem=4MB
+      -c maintenance_work_mem=32MB
+      -c max_connections=30
+      -c wal_buffers=8MB
+      -c checkpoint_completion_target=0.9
     environment:
       POSTGRES_USER: traffic
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-traffic}
@@ -13,6 +21,7 @@ services:
     networks:
       - traffic-ai-net
     restart: unless-stopped
+    mem_limit: 512m
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U traffic"]
       interval: 5s
@@ -21,6 +30,7 @@ services:
 
   redis:
     image: redis:7.2-alpine
+    command: redis-server --maxmemory 100mb --maxmemory-policy allkeys-lru
     ports:
       - "6379:6379"
     volumes:
@@ -28,6 +38,7 @@ services:
     networks:
       - traffic-ai-net
     restart: unless-stopped
+    mem_limit: 128m
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -50,6 +61,7 @@ services:
     networks:
       - traffic-ai-net
     restart: unless-stopped
+    mem_limit: 384m
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8086/health"]
       interval: 10s
@@ -77,12 +89,13 @@ services:
     networks:
       - traffic-ai-net
     restart: unless-stopped
+    mem_limit: 256m
 
   celery_worker:
     build:
       context: .
       dockerfile: Dockerfile
-    command: celery -A traffic_ai.celery_app worker --loglevel=info --concurrency=${CELERY_CONCURRENCY:-8}
+    command: celery -A traffic_ai.celery_app worker --loglevel=info --concurrency=${CELERY_CONCURRENCY:-1}
     env_file: .env
     environment:
       DATABASE_URL: postgresql+asyncpg://traffic:${POSTGRES_PASSWORD:-traffic}@postgres:5432/traffic_ai
@@ -98,6 +111,7 @@ services:
     networks:
       - traffic-ai-net
     restart: unless-stopped
+    mem_limit: 512m
 
   celery_beat:
     build:
@@ -117,11 +131,13 @@ services:
     networks:
       - traffic-ai-net
     restart: unless-stopped
+    mem_limit: 128m
 
   flower:
     image: mher/flower:2.0
     ports:
       - "5555:5555"
+    command: celery --broker=redis://redis:6379/0 flower --basic_auth=admin:flower123
     environment:
       CELERY_BROKER_URL: redis://redis:6379/0
     depends_on:
@@ -130,6 +146,7 @@ services:
     networks:
       - traffic-ai-net
     restart: unless-stopped
+    mem_limit: 128m
 
 networks:
   traffic-ai-net:

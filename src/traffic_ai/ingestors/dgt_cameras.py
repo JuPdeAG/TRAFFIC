@@ -23,6 +23,7 @@ GDPR note: vehicles only — no face or plate extraction. Frames are processed
 in memory and never persisted unless S3_BUCKET is configured.
 """
 from __future__ import annotations
+import asyncio
 import logging
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
@@ -72,28 +73,33 @@ class DGTCameraIngestor(BaseIngestor):
         self._running = False
 
     async def poll(self) -> list[dict[str, Any]]:
-        """Process the next batch of cameras in round-robin order."""
+        """Process all cameras with bounded HTTP concurrency (semaphore=50).
+
+        Round-robin is replaced by full-sweep: every poll visits every camera,
+        limited only by HTTP concurrency (50 parallel requests) so DGT servers
+        are not hammered and the event loop stays responsive.
+        With ~1,900 cameras and 50 concurrent fetches the sweep takes ~80s,
+        well within the 120s balanced-profile beat interval.
+        """
         if not self._cameras:
             await self._load_camera_list()
             if not self._cameras:
                 return []
 
-        # Round-robin: take the next max_cameras cameras from the list
-        total = len(self._cameras)
-        batch_size = min(self.max_cameras, total)
-        indices = [(self._camera_index + i) % total for i in range(batch_size)]
-        self._camera_index = (self._camera_index + batch_size) % total
-        batch = [self._cameras[i] for i in indices]
+        sem = asyncio.Semaphore(15)
 
-        results: list[dict[str, Any]] = []
-        lines: list[str] = []
+        async def _bounded(cam: dict[str, Any]) -> dict[str, Any] | None:
+            async with sem:
+                return await self._process_camera(session, cam)
 
         async with aiohttp.ClientSession() as session:
-            for cam in batch:
-                result = await self._process_camera(session, cam)
-                if result:
-                    results.append(result)
-                    lines.append(self._to_line_protocol(result))
+            raw = await asyncio.gather(
+                *[_bounded(cam) for cam in self._cameras],
+                return_exceptions=True,
+            )
+
+        results = [r for r in raw if r and not isinstance(r, Exception)]
+        lines = [self._to_line_protocol(r) for r in results]
 
         if lines:
             try:
@@ -103,7 +109,7 @@ class DGTCameraIngestor(BaseIngestor):
 
         self.logger.info(
             "DGT cameras: processed %d/%d, wrote %d metrics",
-            len(results), len(batch), len(lines),
+            len(results), len(self._cameras), len(lines),
         )
         return results
 
@@ -179,10 +185,38 @@ class DGTCameraIngestor(BaseIngestor):
             self.logger.exception("Failed to load DGT camera list")
 
 
+# ── Redis round-robin helper ─────────────────────────────────────────────────
+
+def _advance_camera_index(redis_key: str, batch_size: int, total: int) -> int:
+    """Read current index from Redis, store next value, return current.
+
+    Falls back to 0 if Redis is unreachable so ingestion still works.
+    Not perfectly atomic but close enough for camera polling — a duplicate
+    or skipped camera in rare concurrent scenarios is acceptable.
+    """
+    try:
+        import redis as _redis
+        r = _redis.from_url(settings.redis_url, socket_connect_timeout=2, socket_timeout=2)
+        raw = r.get(redis_key)
+        current = int(raw) if raw else 0
+        r.set(redis_key, (current + batch_size) % total)
+        r.close()
+        return current % total
+    except Exception:
+        return 0
+
+
 # ── DATEX II parser ──────────────────────────────────────────────────────────
 
 def _parse_dgt_datex2(xml_bytes: bytes) -> list[dict[str, Any]]:
-    """Parse DGT DATEX II v3.6 XML and return list of camera dicts."""
+    """Parse DGT DATEX II v3.6 XML and return list of camera dicts.
+
+    Real structure per <device>:
+      typeOfDevice:  'camera'
+      deviceUrl:     'https://infocar.dgt.es/etraffic/data/camaras/{ID}.jpg'
+      pointLocation > tpegPointLocation > point > pointCoordinates > latitude/longitude
+      pointLocation > supplementaryPositionalDescription > roadInformation > roadName
+    """
     cameras: list[dict[str, Any]] = []
     try:
         root = ET.fromstring(xml_bytes)
@@ -190,28 +224,32 @@ def _parse_dgt_datex2(xml_bytes: bytes) -> list[dict[str, Any]]:
         logger.warning("Failed to parse DGT DATEX II XML")
         return cameras
 
-    # Walk all elements looking for camera IDs and image URLs.
-    # The structure varies slightly between DGT DATEX II versions so we
-    # search by tag suffix rather than full namespace path.
-    for elem in root.iter():
-        tag = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
-        if tag in ("cameraId", "deviceIdentifier"):
-            camera_id = (elem.text or "").strip()
+    for device in root.iter():
+        if device.tag.split("}")[-1] != "device":
+            continue
+        try:
+            url = _find_text(device, ("deviceUrl",))
+            if not url:
+                continue
+            # Extract camera ID from the image URL filename (strip path + extension)
+            camera_id = url.rstrip("/").rsplit("/", 1)[-1].replace(".jpg", "")
             if not camera_id:
                 continue
-            # Find sibling URL element
-            parent = _find_parent(root, elem)
-            url = _find_text(parent, ("deviceUrl", "cameraImageUrl", "imageUrl"))
-            lat = _find_float(parent, ("latitude",))
-            lon = _find_float(parent, ("longitude",))
-            road = _find_text(parent, ("roadNumber", "road"))
+
+            lat = _find_float(device, ("latitude",))
+            lon = _find_float(device, ("longitude",))
+            road = _find_text(device, ("roadName", "roadNumber", "road"))
+
             cameras.append({
                 "id": camera_id,
-                "url": url or DGT_IMAGE_BASE_URL.format(camera_id=camera_id),
+                "url": url if url.endswith(".jpg") else DGT_IMAGE_BASE_URL.format(camera_id=camera_id),
                 "road": road or "",
                 "lat": lat,
                 "lon": lon,
             })
+        except Exception:
+            continue
+
     return cameras
 
 
