@@ -34,9 +34,9 @@ logger = logging.getLogger(__name__)
 # All models detect COCO classes; we filter to vehicle classes only.
 _MODELS: dict[str, dict[str, str]] = {
     # YOLOv6-nano — meituan/YOLOv6, Apache 2.0
-    # ~4.4 MB, 80ms CPU, good for embedded/free-tier deployment
+    # ~18.8 MB, 80ms CPU, good for embedded/free-tier deployment
     "yolov6n": {
-        "url": "https://github.com/meituan/YOLOv6/releases/download/0.4.0/yolov6n.onnx",
+        "url": "https://github.com/meituan/YOLOv6/releases/download/0.3.0/yolov6n.onnx",
         "sha256": "",  # populated on first download verification
         "license": "Apache-2.0",
         "input_size": 640,
@@ -81,8 +81,8 @@ class VehicleDetector:
             session = self._get_session()
             return self._infer(session, frame_bytes)
         except Exception as exc:
-            logger.warning("Vehicle detection failed (%s), using heuristic: %s", type(exc).__name__, exc)
-            return _heuristic_detect(frame_bytes)
+            logger.debug("Vehicle detection failed (%s): %s — marking offline", type(exc).__name__, exc)
+            return _empty_result(self.model_name)
 
     # ── private ──────────────────────────────────────────────────────────────
 
@@ -249,14 +249,30 @@ def _score_from_count(count: int, width: int, height: int) -> tuple[float, str]:
 
 
 def _heuristic_detect(frame_bytes: bytes) -> dict[str, Any]:
-    """Pixel-variance fallback when ONNX model is unavailable."""
+    """Pixel-variance fallback when ONNX model is unavailable.
+
+    Uses JPEG file size and pixel variance as a proxy for scene complexity:
+    larger, high-variance frames typically correspond to busier road scenes.
+    Vehicle count is a rough estimate from the density score.
+    """
     try:
-        sample = frame_bytes[len(frame_bytes) // 3:][:4096]
-        mean = sum(sample) / len(sample)
-        variance = sum((b - mean) ** 2 for b in sample) / len(sample)
-        score = min(100.0, round((variance / 5000.0) * 100.0, 1))
+        # Larger JPEG = more scene complexity (more edges, vehicles, detail)
+        size_score = min(100.0, len(frame_bytes) / 1500.0)
+
+        # Pixel variance in a middle sample
+        sample = frame_bytes[len(frame_bytes) // 4: len(frame_bytes) // 4 + 4096]
+        if sample:
+            mean = sum(sample) / len(sample)
+            variance = sum((b - mean) ** 2 for b in sample) / len(sample)
+            var_score = min(100.0, (variance / 3000.0) * 100.0)
+        else:
+            var_score = 0.0
+
+        # Weight size (60%) + variance (40%)
+        score = min(100.0, round(size_score * 0.6 + var_score * 0.4, 1))
     except Exception:
         score = 0.0
+
     if score < 15:
         level = "free_flow"
     elif score < 35:
@@ -267,7 +283,16 @@ def _heuristic_detect(frame_bytes: bytes) -> dict[str, Any]:
         level = "heavy"
     else:
         level = "gridlock"
-    return {"vehicle_count": 0, "density_score": score, "density_level": level, "model": "heuristic"}
+
+    # Rough vehicle count estimate mapped from density score (0-100 → 0-25 vehicles)
+    vehicle_count = max(0, int(score / 4))
+
+    return {
+        "vehicle_count": vehicle_count,
+        "density_score": score,
+        "density_level": level,
+        "model": "heuristic",
+    }
 
 
 def _empty_result(model_name: str) -> dict[str, Any]:
