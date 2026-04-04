@@ -28,20 +28,13 @@ from traffic_ai.ingestors.base import BaseIngestor
 
 logger = logging.getLogger(__name__)
 
-# Open Data BCN CKAN API — package_show to resolve real resource UUID
-BCN_PACKAGE_SHOW_URL = (
-    "https://opendata-ajuntament.barcelona.cat/data/api/action/package_show?id=trams"
-)
-
-# Base URL for datastore_search; resource_id is filled in at runtime
-BCN_DATASTORE_SEARCH_BASE = (
-    "https://opendata-ajuntament.barcelona.cat/data/api/action/datastore_search"
-    "?resource_id={resource_id}&limit=500"
-)
-
-# Fallback: static GeoJSON / JSON published by the Ajuntament
-BCN_TRAFFIC_FALLBACK_URL = (
-    "https://opendata-ajuntament.barcelona.cat/resources/bcn/trams-estat.json"
+# Barcelona open data publishes a real-time .dat file (updated every ~5 min).
+# Format: tram_id#timestamp#current_state#expected_state   (hash-delimited)
+# State codes: 0=no data, 1=very fluid, 2=fluid, 3=dense, 4=very dense, 5=congested, 6=closed
+BCN_TRAMS_DAT_URL = (
+    "https://opendata-ajuntament.barcelona.cat/data/dataset/"
+    "8319c2b1-4c21-4962-9acd-6/resource/2d456eb5-4ea6-4f68-9794-2f3f1a58a933"
+    "/download/TRAMS_TRAMS.dat"
 )
 
 # estat → density score (0-100)
@@ -67,30 +60,40 @@ _ESTAT_TO_LEVEL: dict[int, str] = {
 
 
 class BarcelonaIngestor(BaseIngestor):
-    """Ingests Barcelona real-time traffic state from Open Data BCN."""
+    """Ingests Barcelona real-time traffic state from Open Data BCN.
+
+    Fetches the TRAMS_TRAMS.dat file which is updated every ~5 minutes.
+    Format: tram_id#timestamp#current_state#expected_state  (hash-delimited)
+    """
 
     def __init__(self) -> None:
         super().__init__(name="barcelona")
-        self._resource_id: str | None = None
 
     async def start(self) -> None:
         self._running = True
-        self.logger.info("BarcelonaIngestor started")
 
     async def stop(self) -> None:
         self._running = False
 
     async def poll(self) -> list[dict[str, Any]]:
-        """Fetch current traffic state and write to InfluxDB."""
-        data = await self._fetch()
-        if not data:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    BCN_TRAMS_DAT_URL, timeout=aiohttp.ClientTimeout(total=20)
+                ) as resp:
+                    if resp.status != 200:
+                        self.logger.warning("Barcelona .dat returned HTTP %d", resp.status)
+                        return []
+                    text = await resp.text(encoding="utf-8", errors="replace")
+        except Exception:
+            self.logger.exception("Failed to fetch Barcelona TRAMS_TRAMS.dat")
             return []
 
-        records = self._parse(data)
+        records = _parse_dat(text)
         if not records:
             return []
 
-        lines = [self._to_line_protocol(r) for r in records]
+        lines = [_to_line_protocol(r) for r in records]
         try:
             await write_points(lines)
             self.logger.info("Barcelona: wrote %d traffic state points", len(lines))
@@ -99,128 +102,39 @@ class BarcelonaIngestor(BaseIngestor):
 
         return records
 
-    # ── private ─────────────────────────────────────────────────────────────
-
-    async def _resolve_resource_id(self, session: aiohttp.ClientSession) -> str | None:
-        """Resolve the actual CKAN resource UUID for the trams dataset.
-
-        Calls ``package_show?id=trams`` and picks the first active resource
-        whose name contains "TRAMS", falling back to the first resource in the
-        list.  The resolved UUID is cached on ``self._resource_id``.
-        """
-        if self._resource_id:
-            return self._resource_id
+def _parse_dat(text: str) -> list[dict[str, Any]]:
+    """Parse Barcelona TRAMS_TRAMS.dat: tram_id#timestamp#current_state#expected_state."""
+    records: list[dict[str, Any]] = []
+    ts = datetime.now(timezone.utc)
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split("#")
+        if len(parts) < 3:
+            continue
         try:
-            async with session.get(
-                BCN_PACKAGE_SHOW_URL, timeout=aiohttp.ClientTimeout(total=15)
-            ) as resp:
-                if resp.status != 200:
-                    self.logger.warning(
-                        "package_show returned HTTP %d", resp.status
-                    )
-                    return None
-                data = await resp.json()
-            resources: list[dict] = data.get("result", {}).get("resources", [])
-            if not resources:
-                self.logger.warning("No resources found in Barcelona trams package")
-                return None
-            # Prefer a resource whose name contains "TRAMS" (case-insensitive)
-            chosen = next(
-                (r for r in resources if "TRAMS" in r.get("name", "").upper()),
-                resources[0],
-            )
-            self._resource_id = chosen["id"]
-            self.logger.info(
-                "Resolved Barcelona trams resource UUID: %s (%s)",
-                self._resource_id,
-                chosen.get("name", ""),
-            )
-            return self._resource_id
-        except Exception:
-            self.logger.warning("Failed to resolve Barcelona trams resource UUID")
-            return None
+            tram_id = parts[0].strip()
+            estat = int(parts[2].strip())
+            records.append({
+                "tram_id": f"bcn_{tram_id}",
+                "estat": estat,
+                "speed_kmh": 0.0,
+                "density_score": _ESTAT_TO_SCORE.get(estat, 0.0),
+                "density_level": _ESTAT_TO_LEVEL.get(estat, "unknown"),
+                "source": "barcelona_open_data",
+                "ts": ts,
+            })
+        except (ValueError, IndexError):
+            continue
+    return records
 
-    async def _fetch(self) -> dict | list | None:
-        async with aiohttp.ClientSession() as session:
-            # Resolve real resource UUID then try CKAN datastore_search
-            resource_id = await self._resolve_resource_id(session)
-            primary_url: str | None = None
-            if resource_id:
-                primary_url = BCN_DATASTORE_SEARCH_BASE.format(resource_id=resource_id)
 
-            urls_to_try = []
-            if primary_url:
-                urls_to_try.append(primary_url)
-            urls_to_try.append(BCN_TRAFFIC_FALLBACK_URL)
-
-            for url in urls_to_try:
-                try:
-                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=20)) as resp:
-                        if resp.status == 200:
-                            return await resp.json()
-                except Exception:
-                    self.logger.debug("Barcelona fetch failed for %s", url)
-        self.logger.warning("All Barcelona traffic URLs failed")
-        return None
-
-    def _parse(self, data: dict | list) -> list[dict[str, Any]]:
-        records: list[dict[str, Any]] = []
-        ts = datetime.now(timezone.utc)
-
-        # Handle CKAN API response format: {"result": {"records": [...]}}
-        if isinstance(data, dict):
-            rows = (
-                data.get("result", {}).get("records", [])
-                or data.get("records", [])
-                or data.get("features", [])  # GeoJSON fallback
-                or (data.get("tramos") or [])
-            )
-        else:
-            rows = data  # plain list
-
-        for row in rows:
-            try:
-                # Handle GeoJSON feature format
-                if "properties" in row:
-                    row = row["properties"]
-
-                tram_id = str(row.get("idTram") or row.get("id") or "").strip()
-                if not tram_id:
-                    continue
-
-                estat_raw = row.get("estatActual") or row.get("estat") or 0
-                estat = int(estat_raw) if str(estat_raw).isdigit() else 0
-
-                speed_raw = row.get("velocitat") or row.get("speed") or 0
-                try:
-                    speed = float(speed_raw)
-                except (ValueError, TypeError):
-                    speed = 0.0
-
-                density_score = _ESTAT_TO_SCORE.get(estat, 0.0)
-                density_level = _ESTAT_TO_LEVEL.get(estat, "unknown")
-
-                records.append({
-                    "tram_id": f"bcn_{tram_id}",
-                    "description": row.get("descripcio", "").strip(),
-                    "estat": estat,
-                    "speed_kmh": speed,
-                    "density_score": density_score,
-                    "density_level": density_level,
-                    "source": "barcelona_open_data",
-                    "ts": ts,
-                })
-            except Exception:
-                self.logger.debug("Skipping malformed Barcelona row: %s", row)
-
-        return records
-
-    @staticmethod
-    def _to_line_protocol(record: dict[str, Any]) -> str:
-        tram_id = record["tram_id"].replace(" ", r"\ ")
-        return (
-            f"barcelona_traffic,tram_id={tram_id},source=barcelona "
-            f"density_score={record['density_score']},"
-            f"speed_kmh={record['speed_kmh']},"
-            f"estat={record['estat']}i"
-        )
+def _to_line_protocol(record: dict[str, Any]) -> str:
+    tram_id = record["tram_id"].replace(" ", r"\ ")
+    return (
+        f"barcelona_traffic,tram_id={tram_id},source=barcelona "
+        f"density_score={record['density_score']},"
+        f"speed_kmh={record['speed_kmh']},"
+        f"estat={record['estat']}i"
+    )

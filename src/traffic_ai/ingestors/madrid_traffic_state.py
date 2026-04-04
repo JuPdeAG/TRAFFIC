@@ -101,46 +101,53 @@ class MadridTrafficStateIngestor(BaseIngestor):
         return records
 
 
+def _child_text(pm: ET.Element, tag: str, default: str = "") -> str:
+    el = pm.find(tag)
+    return (el.text or default).strip() if el is not None else default
+
+
 def _parse_madrid_state_xml(xml_bytes: bytes) -> list[dict[str, Any]]:
+    """Parse the Informo Madrid pm.xml feed.
+
+    The real feed uses child elements (not attributes) and the root tag is <pms>.
+    Key child elements per <pm>:
+      idelem       — sensor loop ID
+      intensidad   — vehicles/hour
+      ocupacion    — occupancy %
+      carga        — load % (0-100)
+      nivelServicio — congestion level (same scale as Madrid estado)
+      error        — 'S' = sensor error / no data, 'N' = ok
+    """
     records: list[dict[str, Any]] = []
     ts = datetime.now(timezone.utc)
     try:
-        root = ET.fromstring(xml_bytes)
+        xml_str = xml_bytes.decode("utf-8-sig") if isinstance(xml_bytes, bytes) else xml_bytes
+        root = ET.fromstring(xml_str)
     except ET.ParseError:
         logger.warning("Failed to parse Madrid traffic state XML")
         return records
 
     for pm in root.iter("pm"):
         try:
-            tramo_id = pm.get("id", "").strip()
+            # Child-element format (real Informo feed)
+            tramo_id = _child_text(pm, "idelem")
             if not tramo_id:
                 continue
 
-            estado = int(pm.get("estado") or 0)
-            velocidad_raw = pm.get("velocidad") or "0"
-            try:
-                speed = float(velocidad_raw)
-            except ValueError:
-                speed = 0.0
+            # Skip sensors reporting an error
+            if _child_text(pm, "error", "N") == "S":
+                continue
 
-            carga_raw = pm.get("carga") or "0"
-            try:
-                load_pct = float(carga_raw)
-            except ValueError:
-                load_pct = 0.0
-
-            ocupacion_raw = pm.get("ocupacion") or "0"
-            try:
-                occupancy_pct = float(ocupacion_raw)
-            except ValueError:
-                occupancy_pct = 0.0
+            estado = int(_child_text(pm, "nivelServicio") or "0")
+            load_pct = float(_child_text(pm, "carga") or "0")
+            occupancy_pct = float(_child_text(pm, "ocupacion") or "0")
+            # No direct speed in this feed; derive from nivelServicio
+            speed_kmh = float(_child_text(pm, "velocidad") or "0")
 
             records.append({
                 "tramo_id": f"mad_{tramo_id}",
-                "road_code": pm.get("cod_via", ""),
-                "tipo": pm.get("tipo_elem", ""),
-                "description": pm.get("descripcion", "").strip(),
-                "speed_kmh": speed,
+                "description": _child_text(pm, "descripcion"),
+                "speed_kmh": speed_kmh,
                 "load_pct": load_pct,
                 "occupancy_pct": occupancy_pct,
                 "estado": estado,
@@ -150,16 +157,15 @@ def _parse_madrid_state_xml(xml_bytes: bytes) -> list[dict[str, Any]]:
                 "ts": ts,
             })
         except Exception:
-            logger.debug("Skipping malformed Madrid tramo element")
+            logger.debug("Skipping malformed Madrid pm element")
 
     return records
 
 
 def _to_line_protocol(record: dict[str, Any]) -> str:
     tramo_id = record["tramo_id"].replace(" ", r"\ ").replace(",", r"\,")
-    tipo = (record["tipo"] or "unknown").replace(" ", r"\ ")
     return (
-        f"madrid_traffic,tramo_id={tramo_id},tipo={tipo},source=informo "
+        f"madrid_traffic,tramo_id={tramo_id},source=informo "
         f"speed_kmh={record['speed_kmh']},"
         f"load_pct={record['load_pct']},"
         f"occupancy_pct={record['occupancy_pct']},"
