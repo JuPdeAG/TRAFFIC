@@ -32,7 +32,20 @@ from traffic_ai.ingestors.base import BaseIngestor
 logger = logging.getLogger(__name__)
 
 # Spain bounding box (minLon, minLat, maxLon, maxLat)
-_SPAIN_BBOX = "-9.3,36.0,3.3,43.8"
+# TomTom incidents API max bbox is 10,000 km² — Spain (~505,000 km²) doesn't fit.
+# Use per-city bboxes instead (each well under the limit).
+_CITY_BBOXES: list[tuple[str, str]] = [
+    ("-4.0,40.2,-3.3,40.7", "madrid"),    # ~3,000 km²
+    ("-0.6,39.3,0.0,39.7",  "valencia"),  # ~2,500 km²
+    ("1.8,41.2,2.5,41.6",   "barcelona"), # ~2,700 km²
+]
+
+# Approximate city centres used as fallback when geometry is absent
+_CITY_CENTRES: dict[str, tuple[float, float]] = {
+    "madrid":    (40.4168, -3.7038),
+    "valencia":  (39.4699, -0.3763),
+    "barcelona": (41.3851,  2.1734),
+}
 
 # Key highway coordinates: (name, lat, lon)
 # These cover the major arterials in Madrid, Barcelona, Valencia
@@ -76,45 +89,56 @@ class TomTomIncidentsIngestor(BaseIngestor):
             self.logger.warning("TOMTOM_API_KEY not set — skipping incidents poll")
             return []
 
-        url = (
-            f"{_BASE}/5/incidentDetails"
-            f"?bbox={_SPAIN_BBOX}"
-            "&fields=%7BincidentDetails%7Bid,type,magnitude,startDate,endDate,"
-            "from,to,length,delay,roadNumbers%7D%7D"
-            "&language=es-ES"
-            "&timeValidityFilter=present"
-            f"&key={self._key}"
-        )
+        all_records: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
 
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=20)) as resp:
-                    if resp.status == 401:
-                        self.logger.error("TomTom: invalid API key (401)")
-                        return []
-                    if resp.status == 429:
-                        self.logger.warning("TomTom: rate limit hit (429)")
-                        return []
-                    if resp.status != 200:
-                        self.logger.warning("TomTom incidents returned HTTP %d", resp.status)
-                        return []
-                    data = await resp.json(content_type=None)
+                for bbox, city in _CITY_BBOXES:
+                    # fields includes geometry{type,coordinates} for real GPS coords
+                    # and the key properties we need for enrichment
+                    url = (
+                        f"{_BASE}/5/incidentDetails"
+                        f"?bbox={bbox}"
+                        "&language=es-ES"
+                        "&timeValidityFilter=present"
+                        f"&key={self._key}"
+                    )
+                    try:
+                        async with session.get(url, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                            if resp.status == 401:
+                                self.logger.error("TomTom: invalid API key (401)")
+                                return []
+                            if resp.status == 429:
+                                self.logger.warning("TomTom: rate limit hit (429)")
+                                break
+                            if resp.status != 200:
+                                self.logger.warning("TomTom incidents bbox %s returned HTTP %d", bbox, resp.status)
+                                continue
+                            data = await resp.json(content_type=None)
+                    except Exception:
+                        self.logger.exception("Failed to fetch TomTom incidents for bbox %s", bbox)
+                        continue
+
+                    for r in _parse_incidents(data, city):
+                        if r["id"] not in seen_ids:
+                            seen_ids.add(r["id"])
+                            all_records.append(r)
         except Exception:
             self.logger.exception("Failed to fetch TomTom incidents")
             return []
 
-        records = _parse_incidents(data)
-        if not records:
+        if not all_records:
             return []
 
-        lines = [_incident_to_line(r) for r in records]
+        lines = [_incident_to_line(r) for r in all_records]
         try:
             await write_points(lines)
             self.logger.info("TomTom incidents: wrote %d points", len(lines))
         except Exception:
             self.logger.exception("Failed to write TomTom incidents to InfluxDB")
 
-        return records
+        return all_records
 
 
 class TomTomFlowIngestor(BaseIngestor):
@@ -207,9 +231,16 @@ async def _fetch_flow_point(
     }
 
 
-def _parse_incidents(data: dict[str, Any]) -> list[dict[str, Any]]:
+def _parse_incidents(data: dict[str, Any], city: str = "") -> list[dict[str, Any]]:
+    """Parse TomTom v5 incidentDetails response.
+
+    The API returns incidents as GeoJSON features; properties include:
+      id, iconCategory, magnitudeOfDelay, from, to, length, delay, roadNumbers
+    Geometry (LineString or Point) is extracted for map positioning.
+    """
     records: list[dict[str, Any]] = []
     ts = datetime.now(timezone.utc)
+    fallback_lat, fallback_lon = _CITY_CENTRES.get(city, (40.4168, -3.7038))
 
     incidents = data.get("incidents", [])
     for inc in incidents:
@@ -219,12 +250,24 @@ def _parse_incidents(data: dict[str, Any]) -> list[dict[str, Any]]:
             if not inc_id:
                 continue
 
-            inc_type = int(props.get("type", 0))
-            magnitude = int(props.get("magnitude", 0))
-            delay = float(props.get("delay", 0) or 0)
-            length = float(props.get("length", 0) or 0)
-            road_numbers = props.get("roadNumbers", [])
+            # v5 API uses iconCategory (int) instead of type
+            inc_type = int(props.get("iconCategory") or props.get("type") or 0)
+            # v5 API uses magnitudeOfDelay instead of magnitude
+            magnitude = int(props.get("magnitudeOfDelay") or props.get("magnitude") or 0)
+            delay = float(props.get("delay") or 0)
+            length = float(props.get("length") or 0)
+            road_numbers = props.get("roadNumbers") or []
             road = road_numbers[0] if road_numbers else ""
+
+            # Extract coordinates from GeoJSON geometry
+            lat, lon = fallback_lat, fallback_lon
+            geom = inc.get("geometry", {})
+            coords = geom.get("coordinates")
+            if coords:
+                # LineString → first point; Point → coords directly
+                first = coords[0] if isinstance(coords[0], list) else coords
+                if len(first) >= 2:
+                    lon, lat = float(first[0]), float(first[1])
 
             records.append({
                 "id": inc_id,
@@ -235,6 +278,9 @@ def _parse_incidents(data: dict[str, Any]) -> list[dict[str, Any]]:
                 "delay_s": delay,
                 "length_m": length,
                 "road": road,
+                "city": city,
+                "lat": lat,
+                "lon": lon,
                 "source": "tomtom",
                 "ts": ts,
             })
@@ -248,11 +294,13 @@ def _incident_to_line(r: dict[str, Any]) -> str:
     inc_id = r["id"].replace(" ", r"\ ").replace(",", r"\,")
     type_name = r["type_name"].replace(" ", r"\ ")
     road = (r["road"] or "unknown").replace(" ", r"\ ").replace(",", r"\,")
+    city = (r.get("city") or "unknown").replace(" ", r"\ ")
     return (
         f"tomtom_incidents,id={inc_id},type={type_name},"
-        f"magnitude={r['magnitude_name']},road={road},source=tomtom "
+        f"magnitude={r['magnitude_name']},road={road},city={city},source=tomtom "
         f"delay_s={r['delay_s']},length_m={r['length_m']},"
-        f"magnitude_i={r['magnitude']}i,type_i={r['type']}i"
+        f"magnitude_i={r['magnitude']}i,type_i={r['type']}i,"
+        f"lat={r['lat']},lon={r['lon']}"
     )
 
 
