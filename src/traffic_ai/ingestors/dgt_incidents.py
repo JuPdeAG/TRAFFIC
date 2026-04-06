@@ -24,13 +24,14 @@ import aiohttp
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from geoalchemy2 import WKTElement
 from traffic_ai.ingestors.base import BaseIngestor
 from traffic_ai.models.orm import Incident
 
 logger = logging.getLogger(__name__)
 
 DGT_INCIDENTS_URL = (
-    "https://nap.dgt.es/datex2/v3/dgt/SituationPublication/incidencias_datex2_v36.xml"
+    "https://nap.dgt.es/datex2/v3/dgt/SituationPublication/datex2_v36.xml"
 )
 
 
@@ -50,8 +51,15 @@ class DGTIncidentsIngestor(BaseIngestor):
 
     async def poll(self) -> list[dict[str, Any]]:
         """Fetch DATEX II XML and upsert incidents into PostgreSQL."""
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "Accept": "application/xml, text/xml, */*",
+        }
         try:
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(headers=headers) as session:
                 async with session.get(
                     DGT_INCIDENTS_URL,
                     timeout=aiohttp.ClientTimeout(total=30),
@@ -83,6 +91,9 @@ class DGTIncidentsIngestor(BaseIngestor):
 
             if existing is None:
                 # New incident
+                lat = situation.get("lat")
+                lon = situation.get("lon")
+                geom = WKTElement(f"POINT({lon} {lat})", srid=4326) if lat and lon else None
                 incident = Incident(
                     pilot="dgt",
                     incident_type=situation["incident_type"],
@@ -91,7 +102,8 @@ class DGTIncidentsIngestor(BaseIngestor):
                     description=situation["description"],
                     source="dgt_datex2",
                     external_id=ext_id,
-                    started_at=situation.get("started_at") or datetime.now(timezone.utc),
+                    started_at=situation.get("started_at") or datetime.now(),
+                    location_geom=geom,
                 )
                 self.db.add(incident)
                 created += 1
@@ -100,7 +112,13 @@ class DGTIncidentsIngestor(BaseIngestor):
                 existing.status = "active"
                 existing.ended_at = None
                 updated += 1
-            # else: already active, no change needed
+            else:
+                # Already active — backfill coords if missing
+                if existing.location_geom is None:
+                    lat = situation.get("lat")
+                    lon = situation.get("lon")
+                    if lat and lon:
+                        existing.location_geom = WKTElement(f"POINT({lon} {lat})", srid=4326)
 
         # Auto-resolve incidents no longer in the feed
         result = await self.db.execute(
@@ -112,7 +130,7 @@ class DGTIncidentsIngestor(BaseIngestor):
         for incident in result.scalars().all():
             if incident.external_id not in active_ids:
                 incident.status = "resolved"
-                incident.ended_at = datetime.now(timezone.utc)
+                incident.ended_at = datetime.now()
                 resolved += 1
 
         await self.db.flush()
@@ -135,7 +153,8 @@ def _parse_incidents_datex2(xml_bytes: bytes) -> list[dict[str, Any]]:
         return incidents
 
     for situation in _iter_tag(root, "situation"):
-        ext_id = _text(situation, ("id", "situationId"))
+        # id is an XML attribute in DATEX II v3 ("id="6129""), not a child element
+        ext_id = situation.get("id") or _text(situation, ("situationId",))
         if not ext_id:
             continue
 
@@ -144,12 +163,17 @@ def _parse_incidents_datex2(xml_bytes: bytes) -> list[dict[str, Any]]:
         description = _build_description(situation)
         started_at = _parse_datetime(situation, ("situationRecordCreationTime", "startTime"))
 
+        lat = _parse_float(situation, ("latitude",))
+        lon = _parse_float(situation, ("longitude",))
+
         incidents.append({
             "external_id": ext_id,
             "incident_type": incident_type,
             "severity": severity,
             "description": description,
             "started_at": started_at,
+            "lat": lat,
+            "lon": lon,
         })
 
     return incidents
@@ -160,6 +184,14 @@ def _iter_tag(root: ET.Element, tag_suffix: str):
         tag = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
         if tag == tag_suffix:
             yield elem
+
+
+def _parse_float(elem: ET.Element, tags: tuple[str, ...]) -> float | None:
+    val = _text(elem, tags)
+    try:
+        return float(val) if val else None
+    except (ValueError, TypeError):
+        return None
 
 
 def _text(elem: ET.Element, tags: tuple[str, ...]) -> str | None:
@@ -200,23 +232,48 @@ def _parse_severity(situation: ET.Element) -> int:
 
 def _build_description(situation: ET.Element) -> str:
     parts: list[str] = []
-    for tag in ("generalPublicComment", "comment", "description", "roadNumber"):
-        val = _text(situation, (tag,))
-        if val:
-            parts.append(val)
-    return " | ".join(parts[:3]) if parts else "DGT traffic incident"
+    road = _text(situation, ("roadName",))
+    if road:
+        parts.append(road)
+    cause = _text(situation, ("causeType",))
+    detail = _text(situation, ("roadMaintenanceType", "accidentType", "obstructionType",
+                               "poorRoadInfrastructureType", "weatherRelatedRoadConditionType"))
+    if detail:
+        parts.append(detail.replace("_", " "))
+    elif cause:
+        parts.append(cause.replace("_", " "))
+    municipality = _text(situation, ("municipality",))
+    province = _text(situation, ("province",))
+    km = _text(situation, ("kilometerPoint",))
+    location_parts = []
+    if municipality:
+        location_parts.append(municipality)
+    if province and province != municipality:
+        location_parts.append(province)
+    if km:
+        location_parts.append(f"km {km}")
+    if location_parts:
+        parts.append(", ".join(location_parts))
+    return " — ".join(parts) if parts else "DGT traffic incident"
 
 
 def _parse_datetime(situation: ET.Element, tags: tuple[str, ...]) -> datetime | None:
     raw = _text(situation, tags)
     if not raw:
         return None
-    for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S"):
+    # Try ISO 8601 with offset first (e.g. "2021-12-10T14:15:55.000+01:00")
+    try:
+        from datetime import datetime as _dt
+        dt = _dt.fromisoformat(raw)
+        # Column is TIMESTAMP WITHOUT TIME ZONE — store as naive UTC
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt
+    except ValueError:
+        pass
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%SZ"):
         try:
-            dt = datetime.strptime(raw[:19], fmt[:len(fmt)])
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return dt
+            return datetime.strptime(raw[:19], fmt)
         except ValueError:
             continue
     return None
