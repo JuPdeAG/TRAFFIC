@@ -5,11 +5,11 @@ services:
       - "5433:5432"
     command: >
       postgres
-      -c shared_buffers=128MB
-      -c work_mem=4MB
-      -c maintenance_work_mem=32MB
-      -c max_connections=30
-      -c wal_buffers=8MB
+      -c shared_buffers=32MB
+      -c work_mem=2MB
+      -c maintenance_work_mem=16MB
+      -c max_connections=20
+      -c wal_buffers=4MB
       -c checkpoint_completion_target=0.9
     environment:
       POSTGRES_USER: traffic
@@ -21,7 +21,7 @@ services:
     networks:
       - traffic-ai-net
     restart: unless-stopped
-    mem_limit: 192m
+    mem_limit: 128m
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U traffic"]
       interval: 5s
@@ -30,7 +30,7 @@ services:
 
   redis:
     image: redis:7.2-alpine
-    command: redis-server --maxmemory 100mb --maxmemory-policy allkeys-lru
+    command: redis-server --maxmemory 80mb --maxmemory-policy allkeys-lru
     ports:
       - "6379:6379"
     volumes:
@@ -38,7 +38,7 @@ services:
     networks:
       - traffic-ai-net
     restart: unless-stopped
-    mem_limit: 128m
+    mem_limit: 96m
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -61,7 +61,7 @@ services:
     networks:
       - traffic-ai-net
     restart: unless-stopped
-    mem_limit: 256m
+    mem_limit: 192m
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8086/health"]
       interval: 10s
@@ -89,7 +89,7 @@ services:
     networks:
       - traffic-ai-net
     restart: unless-stopped
-    mem_limit: 256m
+    mem_limit: 96m
 
   celery_worker:
     build:
@@ -111,7 +111,7 @@ services:
     networks:
       - traffic-ai-net
     restart: unless-stopped
-    mem_limit: 896m
+    mem_limit: 1024m
 
   celery_beat:
     build:
@@ -131,7 +131,7 @@ services:
     networks:
       - traffic-ai-net
     restart: unless-stopped
-    mem_limit: 128m
+    mem_limit: 64m
 
   flower:
     image: mher/flower:2.0
@@ -146,7 +146,7 @@ services:
     networks:
       - traffic-ai-net
     restart: unless-stopped
-    mem_limit: 128m
+    mem_limit: 64m
 
 networks:
   traffic-ai-net:
