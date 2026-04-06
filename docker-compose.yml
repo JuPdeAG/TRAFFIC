@@ -21,7 +21,7 @@ services:
     networks:
       - traffic-ai-net
     restart: unless-stopped
-    mem_limit: 256m
+    mem_limit: 192m
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U traffic"]
       interval: 5s
@@ -111,7 +111,7 @@ services:
     networks:
       - traffic-ai-net
     restart: unless-stopped
-    mem_limit: 768m
+    mem_limit: 896m
 
   celery_beat:
     build:
