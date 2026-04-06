@@ -111,7 +111,7 @@ services:
     networks:
       - traffic-ai-net
     restart: unless-stopped
-    mem_limit: 1024m
+    mem_limit: 768m
 
   celery_beat:
     build:
