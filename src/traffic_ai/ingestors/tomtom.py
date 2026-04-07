@@ -120,6 +120,12 @@ class TomTomIncidentsIngestor(BaseIngestor):
                         self.logger.exception("Failed to fetch TomTom incidents for bbox %s", bbox)
                         continue
 
+                    self.logger.info(
+                        "TomTom incidents bbox %s keys=%s incidents=%d features=%d",
+                        bbox, list(data.keys()),
+                        len(data.get("incidents") or []),
+                        len(data.get("features") or []),
+                    )
                     for r in _parse_incidents(data, city):
                         if r["id"] not in seen_ids:
                             seen_ids.add(r["id"])
