@@ -39,7 +39,7 @@ _SOURCES: dict[str, dict] = {
     "barcelona_traffic": {
         "measurement": "barcelona_traffic",
         "tag": "tram_id",
-        "fields": ["density_score", "speed_kmh", "estat"],
+        "fields": ["density_score", "density_score_forecast", "speed_kmh", "estat", "estat_forecast"],
     },
     "valencia_traffic": {
         "measurement": "valencia_traffic",

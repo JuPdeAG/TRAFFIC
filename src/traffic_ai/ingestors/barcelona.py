@@ -116,11 +116,14 @@ def _parse_dat(text: str) -> list[dict[str, Any]]:
         try:
             tram_id = parts[0].strip()
             estat = int(parts[2].strip())
+            estat_forecast = int(parts[3].strip()) if len(parts) >= 4 and parts[3].strip().isdigit() else estat
             records.append({
                 "tram_id": f"bcn_{tram_id}",
                 "estat": estat,
+                "estat_forecast": estat_forecast,
                 "speed_kmh": 0.0,
                 "density_score": _ESTAT_TO_SCORE.get(estat, 0.0),
+                "density_score_forecast": _ESTAT_TO_SCORE.get(estat_forecast, 0.0),
                 "density_level": _ESTAT_TO_LEVEL.get(estat, "unknown"),
                 "source": "barcelona_open_data",
                 "ts": ts,
@@ -135,6 +138,8 @@ def _to_line_protocol(record: dict[str, Any]) -> str:
     return (
         f"barcelona_traffic,tram_id={tram_id},source=barcelona "
         f"density_score={record['density_score']},"
+        f"density_score_forecast={record['density_score_forecast']},"
         f"speed_kmh={record['speed_kmh']},"
-        f"estat={record['estat']}i"
+        f"estat={record['estat']}i,"
+        f"estat_forecast={record['estat_forecast']}i"
     )
