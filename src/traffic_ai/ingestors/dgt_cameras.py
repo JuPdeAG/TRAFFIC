@@ -55,7 +55,7 @@ _DEFAULT_STRATEGY: dict[str, Any] = {
     "mode": "all",         # "all" | "roads" | "bbox"
     "roads": [],           # list of road names for "roads" mode
     "bbox": {},            # {lat_min, lat_max, lon_min, lon_max} for "bbox" mode
-    "batch_size": 100,     # 100 cameras/batch keeps peak worker RAM ~550MB
+    "batch_size": 200,     # 200 cameras/batch — full cycle in ~5 min at 30s interval
     "semaphore": 8,        # 8 concurrent ONNX inferences — RAM-safe on t4g.small
 }
 

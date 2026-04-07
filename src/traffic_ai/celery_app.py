@@ -30,22 +30,21 @@ app.conf.beat_schedule = {
     # ── Barcelona Open Data BCN — traffic state, updated every 5 min
     "poll-barcelona": {
         "task": "traffic_ai.tasks.sensor_tasks.poll_barcelona",
-        "schedule": 300.0,
+        "schedule": 180.0,  # 3 min — fast call, extra resolution
         "options": {"priority": 7},
     },
     # ── DGT national incidents (accidents, roadworks, closures)
     "poll-dgt-incidents": {
         "task": "traffic_ai.tasks.sensor_tasks.poll_dgt_incidents",
-        "schedule": 300.0,  # every 5 min — sufficient for incident updates
+        "schedule": 180.0,  # 3 min — catch incident changes faster
         "options": {"priority": 6},
     },
-    # ── DGT national cameras — Redis-locked, back-to-back batches of 400
-    # Beat fires every 45s (was 30s); Redis lock prevents overlapping runs.
-    # At ~2s/batch → all 1,916 cameras cycled every ~4.5 min.
-    # Slowed slightly from 30s to give state/incident tasks room to run.
+    # ── DGT national cameras — Redis-locked, back-to-back batches of 200
+    # Beat fires every 30s; Redis lock prevents overlapping runs.
+    # At ~5s/batch (200 cams) → all 1,916 cameras cycled every ~5 min.
     "poll-dgt-cameras": {
         "task": "traffic_ai.tasks.sensor_tasks.poll_dgt_cameras",
-        "schedule": 45.0,
+        "schedule": 30.0,
         "options": {"priority": 3},  # lower priority than state tasks
     },
     # ── Madrid city cameras — round-robin, 5-min official refresh
@@ -57,22 +56,24 @@ app.conf.beat_schedule = {
     # ── Madrid Informo per-tramo traffic state — updated every 5 min
     "poll-madrid-traffic-state": {
         "task": "traffic_ai.tasks.sensor_tasks.poll_madrid_traffic_state",
-        "schedule": 300.0,
+        "schedule": 180.0,  # 3 min — fast call, extra resolution
         "options": {"priority": 7},  # high priority — official state data
     },
     # ── Valencia city real-time traffic state — updated every 3 min
     "poll-valencia-traffic": {
         "task": "traffic_ai.tasks.sensor_tasks.poll_valencia_traffic",
-        "schedule": 180.0,
+        "schedule": 120.0,  # 2 min — API refreshes every 3 min, harmless to poll faster
         "options": {"priority": 7},
     },
-    # ── TomTom national incidents — 1 call/poll, every 5 min (288 calls/day)
+    # ── TomTom national incidents — 3 bboxes/poll, every 3 min (1,440 calls/day)
+    # Flow kept at 10 min (864/day) → total 2,304/day, under 2,500 free-tier limit.
     "poll-tomtom-incidents": {
         "task": "traffic_ai.tasks.sensor_tasks.poll_tomtom_incidents",
-        "schedule": 300.0,
+        "schedule": 180.0,  # 3 min — 1,440 calls/day (was 864)
         "options": {"priority": 6},
     },
     # ── TomTom flow — 6 key highway points, every 10 min (864 calls/day)
+    # Keep at 10 min — increasing to 5 min would push total over 2,500/day limit.
     "poll-tomtom-flow": {
         "task": "traffic_ai.tasks.sensor_tasks.poll_tomtom_flow",
         "schedule": 600.0,
