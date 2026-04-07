@@ -120,12 +120,6 @@ class TomTomIncidentsIngestor(BaseIngestor):
                         self.logger.exception("Failed to fetch TomTom incidents for bbox %s", bbox)
                         continue
 
-                    self.logger.info(
-                        "TomTom incidents bbox %s keys=%s incidents=%d features=%d",
-                        bbox, list(data.keys()),
-                        len(data.get("incidents") or []),
-                        len(data.get("features") or []),
-                    )
                     for r in _parse_incidents(data, city):
                         if r["id"] not in seen_ids:
                             seen_ids.add(r["id"])
@@ -248,12 +242,12 @@ def _parse_incidents(data: dict[str, Any], city: str = "") -> list[dict[str, Any
     ts = datetime.now(timezone.utc)
     fallback_lat, fallback_lon = _CITY_CENTRES.get(city, (40.4168, -3.7038))
 
-    # v5 API returns GeoJSON FeatureCollection; older shape used "incidents" key
     incidents = data.get("incidents") or data.get("features", [])
     for inc in incidents:
         try:
-            props = inc.get("properties", inc)
-            inc_id = str(props.get("id", "")).strip()
+            props = inc.get("properties") or inc
+            # v5: id is at Feature top level; v4 fallback: id is in properties
+            inc_id = str(inc.get("id") or props.get("id") or "").strip()
             if not inc_id:
                 continue
 
