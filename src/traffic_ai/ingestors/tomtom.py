@@ -242,7 +242,8 @@ def _parse_incidents(data: dict[str, Any], city: str = "") -> list[dict[str, Any
     ts = datetime.now(timezone.utc)
     fallback_lat, fallback_lon = _CITY_CENTRES.get(city, (40.4168, -3.7038))
 
-    incidents = data.get("incidents", [])
+    # v5 API returns GeoJSON FeatureCollection; older shape used "incidents" key
+    incidents = data.get("incidents") or data.get("features", [])
     for inc in incidents:
         try:
             props = inc.get("properties", inc)
