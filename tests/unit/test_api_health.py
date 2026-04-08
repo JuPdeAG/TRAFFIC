@@ -1,5 +1,6 @@
 """Unit tests for health and readiness endpoints (no DB required)."""
 from __future__ import annotations
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
@@ -52,8 +53,9 @@ async def test_register_returns_422_with_short_password():
 async def test_protected_endpoint_requires_auth():
     """Any protected endpoint should return 401 without a token."""
     from unittest.mock import AsyncMock
-    from traffic_ai.main import app
+
     from traffic_ai.db.database import get_db
+    from traffic_ai.main import app
     app.dependency_overrides[get_db] = AsyncMock(return_value=None)
     try:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -67,8 +69,9 @@ async def test_protected_endpoint_requires_auth():
 async def test_protected_endpoint_rejects_bad_token():
     """Protected endpoints should return 401 with a malformed token."""
     from unittest.mock import AsyncMock
-    from traffic_ai.main import app
+
     from traffic_ai.db.database import get_db
+    from traffic_ai.main import app
     app.dependency_overrides[get_db] = AsyncMock(return_value=None)
     try:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:

@@ -1,7 +1,10 @@
 """Tests for the throttle logic bug fix (OR vs AND)."""
 from __future__ import annotations
+
 from unittest.mock import patch
+
 import pytest
+
 from traffic_ai.config import PROFILES, RuntimeResourceManager
 
 

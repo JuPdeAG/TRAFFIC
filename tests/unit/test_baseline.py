@@ -1,7 +1,10 @@
 """Unit tests for the baseline calculator."""
 from __future__ import annotations
+
+from unittest.mock import AsyncMock, patch
+
 import pytest
-from unittest.mock import AsyncMock, patch, MagicMock
+
 from traffic_ai.analytics.baseline import BaselineCalculator
 
 

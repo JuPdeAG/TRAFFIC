@@ -1,6 +1,8 @@
 """Tests for configuration and profile loading."""
 from __future__ import annotations
+
 import pytest
+
 from traffic_ai.config import PROFILES, ProfileConfig, Settings
 
 

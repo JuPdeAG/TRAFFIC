@@ -1,56 +1,68 @@
 """Unit tests for open-data ingestors (no network, no InfluxDB required)."""
 from __future__ import annotations
-import pytest
-from unittest.mock import AsyncMock, patch, MagicMock
-from datetime import datetime, timezone
 
+import pytest
 
 # ── Madrid traffic state ──────────────────────────────────────────────────────
 
 class TestMadridTrafficStateParser:
     def _parse(self, xml: str):
         from traffic_ai.ingestors.madrid_traffic_state import _parse_madrid_state_xml
-        return _parse_madrid_state_xml(xml)
+        return _parse_madrid_state_xml(xml.encode())
 
-    # Real Informo XML uses attributes on the <pm> element, not child elements.
+    # Real Informo feed uses child elements inside <pm>, root tag is <pms>.
+    # Fields: <idelem>, <carga>, <ocupacion>, <nivelServicio>, <error>
 
     def test_parses_single_pm_element(self):
-        xml = '<trafico><pm id="1001" velocidad="72" carga="35" ocupacion="28" estado="1" /></trafico>'
+        xml = ('<pms><pm>'
+               '<idelem>1001</idelem><carga>35</carga><ocupacion>28</ocupacion>'
+               '<nivelServicio>1</nivelServicio><error>N</error>'
+               '</pm></pms>')
         records = self._parse(xml)
         assert len(records) == 1
         r = records[0]
         assert r["tramo_id"] == "mad_1001"
-        assert r["speed_kmh"] == pytest.approx(72.0)
         assert r["load_pct"] == pytest.approx(35.0)
         assert r["estado"] == 1
 
     def test_parses_multiple_pm_elements(self):
-        xml = ('<trafico>'
-               '<pm id="101" velocidad="50" carga="60" ocupacion="40" estado="2" />'
-               '<pm id="102" velocidad="30" carga="80" ocupacion="70" estado="4" />'
-               '</trafico>')
+        xml = ('<pms>'
+               '<pm><idelem>101</idelem><carga>60</carga><ocupacion>40</ocupacion>'
+               '<nivelServicio>2</nivelServicio><error>N</error></pm>'
+               '<pm><idelem>102</idelem><carga>80</carga><ocupacion>70</ocupacion>'
+               '<nivelServicio>4</nivelServicio><error>N</error></pm>'
+               '</pms>')
         records = self._parse(xml)
         assert len(records) == 2
         assert records[0]["tramo_id"] == "mad_101"
         assert records[1]["tramo_id"] == "mad_102"
 
     def test_skips_element_missing_id(self):
-        xml = '<trafico><pm velocidad="50" carga="60" ocupacion="40" estado="1" /></trafico>'
+        xml = '<pms><pm><carga>60</carga><nivelServicio>1</nivelServicio><error>N</error></pm></pms>'
+        records = self._parse(xml)
+        assert len(records) == 0
+
+    def test_skips_sensor_with_error_flag(self):
+        xml = ('<pms><pm>'
+               '<idelem>999</idelem><carga>50</carga><nivelServicio>1</nivelServicio>'
+               '<error>S</error>'
+               '</pm></pms>')
         records = self._parse(xml)
         assert len(records) == 0
 
     def test_handles_empty_xml(self):
-        records = self._parse("<trafico></trafico>")
+        records = self._parse("<pms></pms>")
         assert records == []
 
-    def test_estado_to_density_mapping(self):
+    def test_nivel_servicio_to_density_mapping(self):
         from traffic_ai.ingestors.madrid_traffic_state import _parse_madrid_state_xml
-        for estado, expected_level in [
+        for nivel, expected_level in [
             (0, "unknown"), (1, "free_flow"), (3, "moderate"), (6, "closed"),
         ]:
-            xml = f'<trafico><pm id="1" velocidad="50" carga="50" ocupacion="30" estado="{estado}" /></trafico>'
-            records = _parse_madrid_state_xml(xml)
-            assert records[0]["density_level"] == expected_level, f"estado {estado}"
+            xml = (f'<pms><pm><idelem>1</idelem><carga>50</carga><ocupacion>30</ocupacion>'
+                   f'<nivelServicio>{nivel}</nivelServicio><error>N</error></pm></pms>')
+            records = _parse_madrid_state_xml(xml.encode())
+            assert records[0]["density_level"] == expected_level, f"nivelServicio {nivel}"
 
 
 # ── Valencia traffic parser ───────────────────────────────────────────────────
@@ -76,6 +88,18 @@ class TestValenciaTrafficParser:
         payload = [{"id": "V003", "estado": 2, "velocidad": 45.0}]
         records = self._parse(payload)
         assert len(records) == 1
+
+    def test_parses_real_api_format(self):
+        """Real Valencia OpenDataSoft API uses 'idtramo' and 'denominacion'."""
+        payload = [
+            {"gid": 1919, "idtramo": 226, "denominacion": "PAS INFERIOR GERMANIES", "estado": 1},
+            {"gid": 1920, "idtramo": 227, "denominacion": "AVINGUDA DEL CID", "estado": 2},
+        ]
+        records = self._parse(payload)
+        assert len(records) == 2
+        assert records[0]["seg_id"] == "vlc_226"
+        assert records[0]["description"] == "PAS INFERIOR GERMANIES"
+        assert records[1]["seg_id"] == "vlc_227"
 
     def test_handles_bilingual_speed_field(self):
         payload = {"results": [{"id": "V010", "estado": 1, "velocitat": 55.0}]}
@@ -144,7 +168,6 @@ class TestTomTomIncidentParser:
 class TestTomTomFlowDensity:
     def test_density_score_free_flow(self):
         """Current speed == free flow speed → density 0."""
-        from traffic_ai.ingestors.tomtom import _fetch_flow_point
         # Test the density formula directly
         free_flow = 100.0
         current = 100.0
@@ -170,7 +193,8 @@ class TestTomTomLineProtocol:
         r = {
             "id": "INC 001", "type_name": "road_works", "magnitude_name": "minor",
             "road": "A 6", "delay_s": 60.0, "length_m": 200.0,
-            "magnitude": 1, "type": 9,
+            "magnitude": 1, "type": 9, "city": "madrid",
+            "lat": 40.4168, "lon": -3.7038,
         }
         line = _incident_to_line(r)
         assert r" " not in line.split(" ")[0]  # tags have no unescaped spaces

@@ -1,8 +1,11 @@
 """Unit tests for the risk scoring engine."""
 from __future__ import annotations
+
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
-from unittest.mock import AsyncMock, patch, MagicMock
-from traffic_ai.analytics.risk_scorer import RiskScoringEngine, RiskFactors, DEFAULT_WEIGHTS
+
+from traffic_ai.analytics.risk_scorer import DEFAULT_WEIGHTS, RiskFactors, RiskScoringEngine
 
 
 class TestRiskFactors:
